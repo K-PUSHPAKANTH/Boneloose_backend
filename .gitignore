@@ -1,0 +1,67 @@
+# Python
+
+**pycache**/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+
+venv/
+env/
+ENV/
+.venv/
+
+# Environment Variables
+
+.env
+
+# Logs
+
+*.log
+
+# OS Files
+
+.DS_Store
+Thumbs.db
+
+# Python Distribution
+
+build/
+dist/
+*.egg-info/
+
+# Jupyter Notebook
+
+.ipynb_checkpoints
+
+# Uploaded files / generated files
+
+uploads/
+reports/
+output/
+results/
+
+# Machine Learning Models
+
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.onnx
+*.pb
+
+# Dataset files
+
+*.zip
+*.tar
+*.gz
+*.csv
+
+# IDE
+
+.vscode/
+.idea/
+
+# Cache
+
+.cache/

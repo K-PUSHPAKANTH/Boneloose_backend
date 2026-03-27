@@ -1,37 +1,167 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from sqlalchemy import func
-from database import SessionLocal, engine, Base
-import models
-from models import Analysis
-from schemas import RegisterSchema, LoginSchema
-from crud import create_user, authenticate_user
-
+import smtplib
+import random
 import os
 import shutil
 import uuid
 import tensorflow as tf
 import numpy as np
-from PIL import Image
-from datetime import datetime, timedelta
 
-import smtplib
 from email.mime.text import MIMEText
 from passlib.context import CryptContext
-import random
 from pydantic import BaseModel
+from datetime import datetime, timedelta
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+from database import SessionLocal, engine, Base
+import models
+from models import User, Analysis
+from schemas import RegisterSchema, LoginSchema
+from crud import create_user, authenticate_user
+
+from PIL import Image
+from reportlab.platypus import SimpleDocTemplate, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.pagesizes import A4
+
 
 
 # ---------------- CREATE TABLES ----------------
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Bone Loss Backend")
+
+
+# ---------------- DATABASE ----------------
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+
+EMAIL_ADDRESS = "srik29924@gmail.com"
+EMAIL_PASSWORD = "jdiz fkzm okyk stng"
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+otp_storage = {}
+
+
+# ---------------- FORGOT PASSWORD ----------------
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+@app.post("/forgot-password")
+def forgot_password(data: ForgotPasswordRequest, db: Session = Depends(get_db)):
+
+    email = data.email.strip().lower()
+
+    user = db.query(User).filter(
+        func.lower(User.email) == email
+    ).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Email not registered")
+
+    # Generate OTP
+    otp = str(random.randint(100000, 999999))
+
+    # Update fields
+    user.otp = otp
+    user.otp_expiry = datetime.utcnow() + timedelta(minutes=5)
+    user.otp_verified = False
+
+    db.add(user)      # make sure SQLAlchemy tracks the update
+    db.commit()
+    db.refresh(user)
+
+    print("OTP stored in DB:", user.otp)
+
+    subject = "BoneLoss AI Password Reset"
+    body = f"Your 6-digit OTP is: {otp}\n\nExpires in 5 minutes."
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_ADDRESS
+    msg["To"] = email
+
+    server = smtplib.SMTP("smtp.gmail.com", 587)
+    server.starttls()
+    server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+    server.sendmail(EMAIL_ADDRESS, email, msg.as_string())
+    server.quit()
+
+    return {"message": "OTP sent to email"}
+
+
+
+class VerifyOTPRequest(BaseModel):
+    email: str
+    otp: str
+
+
+@app.post("/verify-otp")
+def verify_otp(data: VerifyOTPRequest, db: Session = Depends(get_db)):
+
+    print(models.User.__table__.columns.keys())
+
+    user = db.query(models.User).filter(
+        func.lower(models.User.email) == data.email.lower()
+    ).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.otp != data.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    if datetime.utcnow() > user.otp_expiry:
+        raise HTTPException(status_code=400, detail="OTP expired")
+
+    user.otp_verified = True
+    db.commit()
+
+    return {"message": "OTP verified"}
+
+
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    new_password: str
+
+
+@app.post("/reset-password")
+def reset_password(data: ResetPasswordRequest, db: Session = Depends(get_db)):
+
+    user = db.query(models.User).filter(
+        func.lower(models.User.email) == data.email.lower()
+    ).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if not user.otp_verified:
+        raise HTTPException(status_code=400, detail="OTP not verified")
+
+    user.password = pwd_context.hash(data.new_password)
+
+    user.otp = None
+    user.otp_expiry = None
+    user.otp_verified = False
+
+    db.commit()
+
+    return {"message": "Password reset successful"}
+
 
 # ---------------- CORS ----------------
 app.add_middleware(
@@ -46,13 +176,7 @@ app.add_middleware(
 model = tf.keras.models.load_model("model/bone_loss_model.h5")
 classes = ["Mild", "Moderate", "Severe"]
 
-# ---------------- DATABASE ----------------
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+
 
 # ---------------- FOLDERS ----------------
 os.makedirs("uploads", exist_ok=True)
@@ -109,6 +233,38 @@ def get_profile(user_id: int, db: Session = Depends(get_db)):
 
     return user
 
+
+# ================= EDIT PROFILE =================
+class UpdateProfileSchema(BaseModel):
+    full_name: str
+    email: str
+
+
+@app.put("/edit-profile/{user_id}")
+def edit_profile(user_id: int, updated_data: UpdateProfileSchema, db: Session = Depends(get_db)):
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.full_name = updated_data.full_name
+    user.email = updated_data.email
+
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "status": "success",
+        "message": "Profile updated successfully",
+        "user": {
+            "id": user.id,
+            "full_name": user.full_name,
+            "email": user.email
+        }
+    }
+
+
 # ---------------- DASHBOARD ----------------
 @app.get("/dashboard/{user_id}")
 def dashboard(user_id: int, db: Session = Depends(get_db)):
@@ -124,6 +280,48 @@ def dashboard(user_id: int, db: Session = Depends(get_db)):
     return {
         "total_cases": total_cases,
         "average_confidence": avg_confidence
+    }
+
+# ---------------- ANALYTICS ----------------
+@app.get("/analytics/{user_id}")
+def analytics(user_id: int, db: Session = Depends(get_db)):
+
+    analyses = db.query(Analysis).filter(Analysis.user_id == user_id).all()
+
+    total_cases = len(analyses)
+
+    avg_loss = round(
+        sum(a.bone_loss_percent for a in analyses) / total_cases, 2
+    ) if total_cases else 0
+
+    accuracy = round(
+        sum(a.confidence for a in analyses) / total_cases, 2
+    ) if total_cases else 0
+
+    mild = db.query(Analysis).filter(
+        Analysis.user_id == user_id,
+        Analysis.prediction == "Mild"
+    ).count()
+
+    moderate = db.query(Analysis).filter(
+        Analysis.user_id == user_id,
+        Analysis.prediction == "Moderate"
+    ).count()
+
+    severe = db.query(Analysis).filter(
+        Analysis.user_id == user_id,
+        Analysis.prediction == "Severe"
+    ).count()
+
+    return {
+        "total_cases": total_cases,
+        "avg_loss": avg_loss,
+        "accuracy": accuracy,
+        "severity_distribution": {
+            "mild": mild,
+            "moderate": moderate,
+            "severe": severe
+        }
     }
 
 # ---------------- IMAGE PREPROCESS ----------------
@@ -210,9 +408,14 @@ def clinical_interpretation(analysis_id: int, db: Session = Depends(get_db)):
         "average_bone_loss": analysis.bone_loss_percent
     }
 
+
 # ---------------- FULL REPORT ----------------
 @app.get("/full-report/{analysis_id}")
 def full_report(analysis_id: int, db: Session = Depends(get_db)):
+
+    # Prevent invalid ID
+    if analysis_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid analysis ID")
 
     analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
 
@@ -226,6 +429,28 @@ def full_report(analysis_id: int, db: Session = Depends(get_db)):
         "confidence": analysis.confidence
     }
 
+# ---------------- SAVED CASES ----------------
+@app.get("/saved-cases/{user_id}")
+def get_saved_cases(user_id: int, db: Session = Depends(get_db)):
+
+    analyses = db.query(Analysis).filter(
+        Analysis.user_id == user_id
+    ).order_by(Analysis.created_at.desc()).limit(5).all()
+
+    results = []
+
+    for a in analyses:
+        results.append({
+            "analysis_id": a.id,
+            "patient_id": a.patient_id,
+            "prediction": a.prediction,
+            "bone_loss_percent": a.bone_loss_percent,
+            "confidence": a.confidence,
+            "created_at": a.created_at
+        })
+
+    return results
+
 # ---------------- HISTORY ----------------
 @app.get("/history/{user_id}")
 def history(user_id: int, db: Session = Depends(get_db)):
@@ -236,6 +461,7 @@ def history(user_id: int, db: Session = Depends(get_db)):
 
     return analyses
 
+
 # ---------------- EXPORT PDF ----------------
 @app.get("/export-pdf/{analysis_id}")
 def export_pdf(analysis_id: int, db: Session = Depends(get_db)):
@@ -243,6 +469,9 @@ def export_pdf(analysis_id: int, db: Session = Depends(get_db)):
     analysis = db.query(Analysis).filter(
         Analysis.id == analysis_id
     ).first()
+
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
 
     file_path = f"reports/report_{analysis_id}.pdf"
 
